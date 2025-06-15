@@ -105,12 +105,13 @@ Prerequisites
 
 Python 3.8+ installed on your computer
 Git installed (to clone the repository)
+Git LFS (to handle large files)
 Internet connection (to download dependencies)
 
 1. Clone the Repository
 
-git clone https://github.com/brandonelward/fraud-detection-system.git
-cd fraud-detection-system
+git clone https://github.com/brandonelward/Individual-Research-Project.git
+cd Individual-Research-Project
 
 2. Set Up Python Environment
 On Windows:
