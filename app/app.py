@@ -151,7 +151,7 @@ def get_scoring_metrics():
         'average_precision': make_scorer(average_precision_score, needs_proba=True)
     }
 
-@st.cache_data
+
 def perform_cross_validation(X, y, dataset_name, cv_folds=5):
     """Performs stratified cross-validation on multiple models."""
     skf = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
@@ -555,6 +555,17 @@ if analysis_mode == "Cross-Validation Analysis":
         help="Higher folds = more robust results but longer computation time"
     )
     
+    # Adds a data sampler slider to control memory usage
+    sample_size = st.sidebar.slider(
+        "CV Data Sample Size:",
+        min_value=1000,
+        max_value=50000,
+        value=20000, # A reasonable default to prevent crashes
+        step=1000,
+        help="Use a smaller sample to prevent memory crashes on the deployed app. Max is 50,000 rows."
+    )
+
+    # Displays selected configuration
     st.sidebar.info(f"Running {cv_folds}-fold stratified cross-validation on {cv_dataset_choice}")
     
     # CROSS-VALIDATION ANALYSIS TAB
@@ -588,36 +599,56 @@ if analysis_mode == "Cross-Validation Analysis":
         st.error(f"Error loading dataset: {e}")
         st.stop()
     
-    # Displays dataset information
-    with st.expander("📋 Dataset Information", expanded=False):
-        col1, col2, col3 = st.columns(3)
+
+    # Creates the sample of the data
+    if len(dataset_df) > sample_size:
+        # Stratified sampling is used to maintain the fraud rate in the sample
+        fraud_df = dataset_df[dataset_df[target_col] == 1]
+        non_fraud_df = dataset_df[dataset_df[target_col] == 0]
         
-        with col1:
-            st.metric("Total Transactions", f"{len(dataset_df):,}")
-        
-        with col2:
-            fraud_count = dataset_df[target_col].sum()
-            st.metric("Fraudulent Transactions", f"{fraud_count:,}")
-        
-        with col3:
-            fraud_rate = fraud_count / len(dataset_df) * 100
-            st.metric("Fraud Rate", f"{fraud_rate:.2f}%")
-        
-        st.write("**Dataset Preview:**")
-        st.dataframe(dataset_df.head(), use_container_width=True)
-    
-    # Run Cross-Validation Analysis
-    if st.button("🚀 Run Cross-Validation Analysis", type="primary"):
-        
-        with st.spinner("Preprocessing data and preparing models..."):
-            # Preprocesses the data
-            X_cv, y_cv = preprocessing_func(dataset_df, for_performance=True)
+        # Calculates how many non-fraud samples we need
+        if not fraud_df.empty:
+            fraud_ratio = len(fraud_df) / len(dataset_df)
+            n_fraud_sample = int(sample_size * fraud_ratio)
+            n_non_fraud_sample = sample_size - n_fraud_sample
             
+            # Ensures we don't try to sample more than we have
+            n_fraud_sample = min(n_fraud_sample, len(fraud_df))
+            n_non_fraud_sample = min(n_non_fraud_sample, len(non_fraud_df))
+
+            sampled_fraud = fraud_df.sample(n=n_fraud_sample, random_state=42)
+            sampled_non_fraud = non_fraud_df.sample(n=n_non_fraud_sample, random_state=42)
+            
+            cv_sample_df = pd.concat([sampled_fraud, sampled_non_fraud]).sample(frac=1, random_state=42).reset_index(drop=True)
+        else: # If no fraud, just take a random sample
+            cv_sample_df = dataset_df.sample(n=sample_size, random_state=42)
+    else:
+        cv_sample_df = dataset_df
+
+
+    # Displays dataset information
+    with st.expander("📋 Dataset Information (Using Sample for CV)", expanded=True):
+        st.info(f"A random sample of **{len(cv_sample_df):,}** transactions is being used for this analysis to conserve memory.")
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Transactions", f"{len(cv_sample_df):,}")
+        with col2:
+            fraud_count = cv_sample_df[target_col].sum()
+            st.metric("Fraudulent Transactions", f"{fraud_count:,}")
+        with col3:
+            fraud_rate = fraud_count / len(cv_sample_df) * 100 if len(cv_sample_df) > 0 else 0
+            st.metric("Fraud Rate in Sample", f"{fraud_rate:.2f}%")
+        st.dataframe(cv_sample_df.head(), use_container_width=True)
+    
+    # Runs Cross-Validation Analysis
+    if st.button("🚀 Run Cross-Validation Analysis", type="primary"):
+        with st.spinner("Preprocessing data and preparing models..."):
+            # Uses the sampled data for CV
+            X_cv, y_cv = preprocessing_func(cv_sample_df, for_performance=True)
             st.success(f"✅ Data preprocessed successfully!")
-            st.info(f"Features: {X_cv.shape[1]}, Samples: {X_cv.shape[0]:,}")
         
         st.subheader("🔄 Running Cross-Validation")
-        st.write(f"Evaluating 4 different models using {cv_folds}-fold stratified cross-validation...")
+        cv_results = perform_cross_validation(X_cv, y_cv, cv_dataset_choice, cv_folds)
         
         # Performs cross-validation
         cv_results = perform_cross_validation(X_cv, y_cv, cv_dataset_choice, cv_folds)
