@@ -100,49 +100,84 @@ The system evaluates several model architectures, defined within the Streamlit a
     )
 
 
-# 🚀 Installation
-
+# 🚀 Quick Start Guide
 Prerequisites
 
-    Python 3.8 or higher
+Python 3.8+ installed on your computer
+Git installed (to clone the repository)
+Internet connection (to download dependencies)
 
-    pip package manager
+1. Clone the Repository
 
+git clone https://github.com/brandonelward/fraud-detection-system.git
+cd fraud-detection-system
 
-Setup
-Clone the repository:
-
-git clone [https://github.com/brandonelward/INDIVIDUAL-RESEARCH-PROJECT.git](https://github.com/brandonelward/INDIVIDUAL-RESEARCH-PROJECT.git)
-cd INDIVIDUAL-RESEARCH-PROJECT
-
-Create a virtual environment:
+2. Set Up Python Environment
+On Windows:
 
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+.venv\Scripts\activate
 
-Install dependencies:
+On Mac/Linux:
+
+python3 -m venv .venv
+source .venv/bin/activate
+
+3. Install Required Packages
 
 pip install -r requirements.txt
 
-Download datasets:
+4. Download Required Data Files
+You need to add the datasets to the data/ folder. Create the folder if it doesn't exist:
+Required files:
 
-    Creditcard:
+data/creditcard.csv - Download from Kaggle - https://www.kaggle.com/datasets/mlg-ulb/creditcardfraud 
 
-    Transactions:
+data/transactions.csv - Download from Kaggle - https://www.kaggle.com/datasets/ealaxi/paysim1 - Rename csv to transactions.csv
 
-    Place the datasets in the data/ directory.
+mkdir data
+# Place your downloaded CSV files in the data/ folder
 
+5. Train Individual Models
+
+# Run Jupyter notebooks in sequence:
+jupyter notebook notebooks/01_creditcard_xgboost_model.ipynb
+jupyter notebook notebooks/02_transactions_xgboost_model.ipynb
+jupyter notebook notebooks/03_creditcard_ensemble__model.ipynb
+jupyter notebook notebooks/04_transactions_ensemble_model.ipynb
+
+6. Run Cross-Validation Analysis
+
+python run_cv_analysis.py
+
+7. Run the Dashboard
+
+streamlit run app/app.py
+or
+python -m streamlit run app/app.py
+
+8. Open Your Browser
+
+The dashboard will automatically open at: http://localhost:8501
+If it doesn't open automatically, copy and paste this URL into your browser.
+
+# 🔧 Troubleshooting
+Problem: ModuleNotFoundError
+Solution: Make sure your virtual environment is activated and run pip install -r requirements.txt again
+
+Problem: FileNotFoundError for datasets
+Solution: Ensure CSV files are in the data/ folder with exact names: creditcard.csv and transactions.csv
+
+Problem: Port already in use
+Solution: Run streamlit run app/app.py --server.port 8502 to use a different port
+
+Problem: Python command not found
+Solution: Try python3 instead of python, or install Python from python.org
 
 # 💻 Usage
 Running the Web Application 
 
 All analysis is performed through the interactive web interface.
-
-streamlit run app/app.py
-or 
-python -m streamlit run app/app.py
-
-This launches the application at http://localhost:8501.
 
 
 # 🖥️ Web Application Features
