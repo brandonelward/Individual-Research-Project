@@ -163,3 +163,15 @@ cython_debug/
 # Python virtual environments
 .venv/
 .conda/
+
+# Dataset files
+data/
+*.csv
+
+# Specifically exclude large dataset files
+creditcard.csv
+transactions.csv
+transactions_sample_280k.csv
+complex_ground_truth.csv
+complex_upload_file.csv
+test_transactions.csv
