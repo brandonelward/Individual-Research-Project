@@ -1,0 +1,5 @@
+Model,Accuracy,Precision,Recall,F1,Roc Auc,Average Precision
+Logistic Regression,0.9765 ± 0.0015,0.0632 ± 0.0032,0.9106 ± 0.0236,0.1182 ± 0.0055,nan ± nan,nan ± nan
+Random Forest,0.9995 ± 0.0001,0.9593 ± 0.0287,0.7581 ± 0.0207,0.8468 ± 0.0212,nan ± nan,nan ± nan
+XGBoost,0.9996 ± 0.0001,0.9158 ± 0.0370,0.8293 ± 0.0236,0.8700 ± 0.0252,nan ± nan,nan ± nan
+Ensemble (RF+LR),0.9996 ± 0.0001,0.9309 ± 0.0277,0.8191 ± 0.0251,0.8713 ± 0.0246,nan ± nan,nan ± nan

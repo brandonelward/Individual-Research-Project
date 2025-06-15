@@ -8,6 +8,9 @@ import matplotlib.pyplot as plt
 import time
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, average_precision_score, PrecisionRecallDisplay, roc_auc_score, precision_score, recall_score, f1_score, roc_curve, precision_recall_curve, RocCurveDisplay
+from sklearn.model_selection import StratifiedKFold, cross_validate
+from sklearn.metrics import make_scorer
+from sklearn.ensemble import StackingClassifier
 import seaborn as sns
 import plotly.graph_objects as go
 import plotly.express as px
@@ -15,6 +18,10 @@ from plotly.subplots import make_subplots
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier
+import warnings
+
+# Suppress warnings for cleaner output
+warnings.filterwarnings('ignore')
 
 # Preprocessing Functions
 def preprocess_transactions_data(df, for_performance=False):
@@ -71,6 +78,243 @@ def preprocess_credit_card_data(df, for_performance=False):
             df_processed = df_processed.drop(columns=['Class'])
         return df_processed[model_features]
 
+# Cross-Validation Functions
+@st.cache_data
+def get_models_for_cv(y_train, dataset_type):
+    """
+    Returns a dictionary of machine learning models for cross-validation.
+    This version includes an improved Stacking Ensemble with passthrough=True.
+    """
+    scale_pos_weight = (y_train == 0).sum() / (y_train == 1).sum()
+
+    # Defines the Base Models
+    # These are the individual models that will be compared and used in the ensemble.
+    # Uses the original robust defaults that were performing well.
+    lr_model = LogisticRegression(
+        random_state=42, class_weight='balanced', max_iter=1000, solver='liblinear'
+    )
+    
+    rf_model = RandomForestClassifier(
+        n_estimators=100,
+        random_state=42,
+        class_weight='balanced',
+        n_jobs=-1
+    )
+    
+    xgb_model = XGBClassifier(
+        random_state=42,
+        scale_pos_weight=scale_pos_weight,
+        use_label_encoder=False,
+        eval_metric='logloss',
+        n_jobs=-1
+    )
+    
+    # Defines the Stacking Ensemble Model
+    # A list of the strongest base models (estimators)
+    level0_estimators = [
+        ('rf', rf_model),
+        ('xgb', xgb_model)
+    ]
+
+    # The meta-model that combines the predictions from the base models
+    level1_meta_model = LogisticRegression(random_state=42)
+
+    # Creates the Stacking Classifier with passthrough=True
+    # The final_estimator (Logistic Regression)
+    # will receive both the predictions from the base models AND the original features.
+    stacking_clf = StackingClassifier(
+        estimators=level0_estimators,
+        final_estimator=level1_meta_model,
+        cv=3,
+        passthrough=True  
+    )
+    
+    # Returns the dictionary of all models to be tested
+    models = {
+        'Logistic Regression': lr_model,
+        'Random Forest': rf_model,
+        'XGBoost': xgb_model,
+        'Stacking Ensemble (RF+XGB)': stacking_clf 
+    }
+    
+    return models
+
+
+def get_scoring_metrics():
+    """Defines the scoring metrics for model evaluation."""
+    return {
+        'accuracy': make_scorer(accuracy_score),
+        'precision': make_scorer(precision_score, zero_division=0),
+        'recall': make_scorer(recall_score, zero_division=0),
+        'f1': make_scorer(f1_score, zero_division=0),
+        'roc_auc': make_scorer(roc_auc_score, needs_proba=True),
+        'average_precision': make_scorer(average_precision_score, needs_proba=True)
+    }
+
+@st.cache_data
+def perform_cross_validation(X, y, dataset_name, cv_folds=5):
+    """Performs stratified cross-validation on multiple models."""
+    skf = StratifiedKFold(n_splits=cv_folds, shuffle=True, random_state=42)
+    scoring = get_scoring_metrics()
+    models = get_models_for_cv(y, dataset_name)
+    results = {}
+    
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    model_names = list(models.keys())
+    total_models = len(model_names)
+    
+    # Display initial status
+    for idx, (model_name, model) in enumerate(models.items()):
+        status_text.text(f"Evaluating {model_name}... ({idx+1}/{total_models})")
+        
+        try:
+            # Adds error_score='raise' to debug or a value like 0.0 to handle it
+            cv_run_results = cross_validate(
+                estimator=model, X=X, y=y, cv=skf, 
+                scoring=scoring, n_jobs=-1,
+                error_score=0.0 
+            )
+            results[model_name] = cv_run_results
+        except Exception as e:
+            st.error(f"Error evaluating {model_name}: {e}")
+            # If it fails completely, fill results with zeros to prevent crashes later
+            results[model_name] = {f'test_{metric}': np.zeros(cv_folds) for metric in scoring.keys()}
+            continue
+            
+        progress_bar.progress((idx + 1) / total_models)
+    
+    progress_bar.empty()
+    status_text.empty()
+    
+    return results
+
+def create_cv_summary_table(results):
+    """Creates a formatted summary table of CV results."""
+    summary_data = []
+    metrics = get_scoring_metrics().keys()
+    
+    for model_name, model_results in results.items():
+        row = {'Model': model_name}
+        for metric in metrics:
+            mean_val = model_results[f'test_{metric}'].mean()
+            std_val = model_results[f'test_{metric}'].std()
+            row[metric.replace('_', ' ').title()] = f"{mean_val:.4f} ± {std_val:.4f}"
+        summary_data.append(row)
+    
+    return pd.DataFrame(summary_data)
+
+def create_cv_visualisations(results, dataset_name):
+    """Creates visualisations for cross-validation results."""
+    metrics = ['test_f1', 'test_average_precision', 'test_recall', 'test_precision']
+    metric_names = ['F1-Score', 'Average Precision (AUPRC)', 'Recall', 'Precision']
+    
+    # Creates subplot figure with Plotly
+    fig = make_subplots(
+        rows=2, cols=2,
+        subplot_titles=metric_names,
+        vertical_spacing=0.12,
+        horizontal_spacing=0.1
+    )
+    
+    colors = px.colors.qualitative.Set3
+    
+    for idx, (metric, name) in enumerate(zip(metrics, metric_names)):
+        row = (idx // 2) + 1
+        col = (idx % 2) + 1
+        
+        model_names = list(results.keys())
+        means = [results[model][metric].mean() for model in model_names]
+        stds = [results[model][metric].std() for model in model_names]
+        
+        # Creates bar chart
+        fig.add_trace(
+            go.Bar(
+                x=model_names,
+                y=means,
+                error_y=dict(type='data', array=stds),
+                name=name,
+                marker_color=colors[idx],
+                text=[f'{m:.3f}' for m in means],
+                textposition='auto',
+                showlegend=False
+            ),
+            row=row, col=col
+        )
+    
+    fig.update_layout(
+        title=f'Cross-Validation Performance Comparison: {dataset_name}',
+        height=700,
+        template='plotly_dark'
+    )
+    
+    # Updates x-axis labels to be rotated
+    fig.update_xaxes(tickangle=45)
+    
+    return fig
+
+def create_cv_box_plots(results, dataset_name):
+    """Creates box plots showing metric distributions across folds."""
+    metrics_to_plot = ['test_f1', 'test_average_precision', 'test_recall', 'test_precision']
+    metric_names = ['F1-Score', 'Average Precision (AUPRC)', 'Recall', 'Precision']
+    
+    plot_data = []
+    for model, res in results.items():
+        for metric, name in zip(metrics_to_plot, metric_names):
+            for score in res[metric]:
+                plot_data.append({'Model': model, 'Metric': name, 'Score': score})
+    
+    plot_df = pd.DataFrame(plot_data)
+    
+    # Creates box plot with Plotly
+    fig = px.box(
+        plot_df, 
+        x='Metric', 
+        y='Score', 
+        color='Model',
+        title=f'Metric Distributions Across CV Folds: {dataset_name}',
+        template='plotly_dark'
+    )
+    
+    fig.update_layout(height=500)
+    
+    return fig
+
+def create_cv_radar_chart(results):
+    """Creates a radar chart comparing average performance across metrics."""
+    metrics = ['test_accuracy', 'test_precision', 'test_recall', 'test_f1', 'test_average_precision']
+    metric_labels = ['Accuracy', 'Precision', 'Recall', 'F1-Score', 'AUPRC']
+    
+    fig = go.Figure()
+    
+    colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728']
+    
+    for idx, (model_name, model_results) in enumerate(results.items()):
+        values = [model_results[metric].mean() for metric in metrics]
+        values.append(values[0])  # Close the radar chart
+        
+        fig.add_trace(go.Scatterpolar(
+            r=values,
+            theta=metric_labels + [metric_labels[0]],
+            fill='toself',
+            name=model_name,
+            line_color=colors[idx % len(colors)]
+        ))
+    
+    fig.update_layout(
+        polar=dict(
+            radialaxis=dict(
+                visible=True,
+                range=[0, 1]
+            )),
+        showlegend=True,
+        title="Cross-Validation Performance Radar Chart",
+        template='plotly_dark'
+    )
+    
+    return fig
+
 # Model Comparison Functions
 @st.cache_resource
 def load_all_models():
@@ -116,7 +360,7 @@ def calculate_model_metrics(model, X, y):
 def create_comparison_visualisations(metrics_dict, dataset_name):
     """Creates interactive comparison visualisations using Plotly."""
     
-    # Prepares data for visualization
+    # Prepares data for visualisation
     models = list(metrics_dict.keys())
     metrics_names = ['accuracy', 'precision', 'recall', 'f1_score', 'roc_auc', 'auprc']
     
@@ -247,7 +491,7 @@ def st_shap_plot(shap_explanation_object):
     st.pyplot(fig, clear_figure=True)
     plt.close(fig)
     
-    # Adds a comprehensive explanation for better understanding
+    # Comprehensive explanation for better understanding
     st.markdown("""
     ### 📖 **How to Read This SHAP Explanation**
     
@@ -273,7 +517,7 @@ def st_shap_plot(shap_explanation_object):
     - Blue features explain "**Why NOT flagged as fraud**"
     """)
     
-    # Adds a helpful tip box
+    # Helpful tip box
     st.info("""
     💡 **Pro Tip**: Focus on the **top 3-5 features** with the longest bars - these are the main reasons 
     behind the model's decision. This helps fraud analysts understand which transaction patterns to investigate first!
@@ -287,14 +531,454 @@ st.write("This application uses machine learning to detect fraudulent transactio
 # Sidebar with Model Comparison Option
 st.sidebar.header("⚙️ Configuration")
 
-# Adds mode selection
+# Mode selection
 analysis_mode = st.sidebar.radio(
     "Choose Analysis Mode:",
-    ("Single Model Analysis", "Model Comparison")
+    ("Single Model Analysis", "Model Comparison", "Cross-Validation Analysis")
 )
 
-if analysis_mode == "Single Model Analysis":
-    # Original single model selection
+if analysis_mode == "Cross-Validation Analysis":
+    st.sidebar.write("**Cross-Validation Analysis Mode Selected**")
+
+    # Dataset selection for CV
+    cv_dataset_choice = st.sidebar.selectbox(
+        "Choose Dataset for Cross-Validation:",
+        ("Credit Card Dataset", "Transactions Dataset (Sample)")
+    )
+    
+    # CV parameters
+    cv_folds = st.sidebar.slider(
+        "Number of CV Folds:",
+        min_value=3,
+        max_value=10,
+        value=5,
+        help="Higher folds = more robust results but longer computation time"
+    )
+    
+    st.sidebar.info(f"Running {cv_folds}-fold stratified cross-validation on {cv_dataset_choice}")
+    
+    # CROSS-VALIDATION ANALYSIS TAB
+    st.header(f"📊 Cross-Validation Analysis: {cv_dataset_choice}")
+    st.write(f"""
+    Comprehensive {cv_folds}-fold stratified cross-validation analysis comparing multiple machine learning models.
+    This provides robust performance estimates by training and testing on different data splits.
+    """)
+    
+    # Loads appropriate dataset
+    try:
+        script_dir = Path(__file__).parent.parent
+        
+        if cv_dataset_choice == "Credit Card Dataset":
+            data_path = script_dir / "data" / "creditcard.csv"
+            preprocessing_func = preprocess_credit_card_data
+            target_col = 'Class'
+        else:  # Transactions Dataset
+            data_path = script_dir / "data" / "transactions_sample_280k.csv"
+            preprocessing_func = preprocess_transactions_data
+            target_col = 'isFraud'
+        
+        if not data_path.exists():
+            st.error(f"Dataset not found at: {data_path}")
+            st.info("Please ensure the required dataset files are in the data directory.")
+            st.stop()
+            
+        dataset_df = load_sample_data(data_path)
+        
+    except Exception as e:
+        st.error(f"Error loading dataset: {e}")
+        st.stop()
+    
+    # Displays dataset information
+    with st.expander("📋 Dataset Information", expanded=False):
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("Total Transactions", f"{len(dataset_df):,}")
+        
+        with col2:
+            fraud_count = dataset_df[target_col].sum()
+            st.metric("Fraudulent Transactions", f"{fraud_count:,}")
+        
+        with col3:
+            fraud_rate = fraud_count / len(dataset_df) * 100
+            st.metric("Fraud Rate", f"{fraud_rate:.2f}%")
+        
+        st.write("**Dataset Preview:**")
+        st.dataframe(dataset_df.head(), use_container_width=True)
+    
+    # Run Cross-Validation Analysis
+    if st.button("🚀 Run Cross-Validation Analysis", type="primary"):
+        
+        with st.spinner("Preprocessing data and preparing models..."):
+            # Preprocesses the data
+            X_cv, y_cv = preprocessing_func(dataset_df, for_performance=True)
+            
+            st.success(f"✅ Data preprocessed successfully!")
+            st.info(f"Features: {X_cv.shape[1]}, Samples: {X_cv.shape[0]:,}")
+        
+        st.subheader("🔄 Running Cross-Validation")
+        st.write(f"Evaluating 4 different models using {cv_folds}-fold stratified cross-validation...")
+        
+        # Performs cross-validation
+        cv_results = perform_cross_validation(X_cv, y_cv, cv_dataset_choice, cv_folds)
+        
+        if cv_results:
+            st.success("✅ Cross-Validation Analysis Complete!")
+            
+            # Displays results summary
+            st.subheader("📋 Cross-Validation Results Summary")
+            
+            summary_df = create_cv_summary_table(cv_results)
+            
+            # Highlights best performing models for each metric
+            def highlight_best(s):
+                # Extracts numeric values from string format "X.XXXX ± X.XXXX"
+                numeric_values = []
+                for val in s:
+                    if isinstance(val, str) and '±' in val:
+                        numeric_val = float(val.split('±')[0].strip())
+                        numeric_values.append(numeric_val)
+                    else:
+                        numeric_values.append(0)
+                
+                max_val = max(numeric_values)
+                return ['background-color: lightgreen' if val == max_val and val > 0 else '' 
+                        for val in numeric_values]
+            
+            # Displays styled dataframe
+            styled_df = summary_df.set_index('Model')
+            
+            # Highlights the maximum value in each column
+            styled_df = styled_df.style.highlight_max(axis=0, color='lightgreen')
+            
+            st.dataframe(styled_df, use_container_width=True)
+            
+            # Download link for results
+            csv_results = summary_df.to_csv(index=False)
+            st.download_button(
+                label="📁 Download CV Results as CSV",
+                data=csv_results,
+                file_name=f"cv_results_{cv_dataset_choice.lower().replace(' ', '_')}.csv",
+                mime="text/csv"
+            )
+            
+            # Visualisations
+            st.subheader("📈 Cross-Validation Performance Visualisations")
+            
+            # Performance comparison charts
+            cv_fig = create_cv_visualisations(cv_results, cv_dataset_choice)
+            st.plotly_chart(cv_fig, use_container_width=True)
+            
+            # Box plots showing distribution across folds
+            st.subheader("📦 Metric Distributions Across Folds")
+            st.write("These box plots show how consistently each model performs across different data splits:")
+            
+            box_fig = create_cv_box_plots(cv_results, cv_dataset_choice)
+            st.plotly_chart(box_fig, use_container_width=True)
+            
+            # Radar chart comparison
+            st.subheader("🎯 Model Performance Radar Chart")
+            st.write("Comprehensive comparison of all metrics in a single visualisation:")
+            
+            radar_fig = create_cv_radar_chart(cv_results)
+            st.plotly_chart(radar_fig, use_container_width=True)
+            
+            # Statistical Analysis
+            st.subheader("📊 Statistical Analysis")
+            
+            # Best performing model for each metric
+            st.write("**🏆 Best Performing Model by Metric:**")
+            
+            best_models = {}
+            metrics = ['test_accuracy', 'test_precision', 'test_recall', 'test_f1', 'test_average_precision', 'test_roc_auc']
+            metric_names = ['Accuracy', 'Precision', 'Recall', 'F1-Score', 'AUPRC', 'ROC-AUC']
+            
+            for metric, metric_name in zip(metrics, metric_names):
+                best_score = 0
+                best_model = ""
+                
+                for model_name, results in cv_results.items():
+                    mean_score = results[metric].mean()
+                    if mean_score > best_score:
+                        best_score = mean_score
+                        best_model = model_name
+                
+                best_models[metric_name] = (best_model, best_score)
+            
+            cols = st.columns(3)
+            for idx, (metric_name, (model, score)) in enumerate(best_models.items()):
+                with cols[idx % 3]:
+                    st.metric(f"Best {metric_name}", model, f"{score:.3f}")
+            
+            # Overall recommendation
+            st.subheader("💡 Model Recommendations")
+            
+            # Calculates overall scores (weighted average of key metrics)
+            overall_scores = {}
+            weights = {
+                'test_f1': 0.3,
+                'test_average_precision': 0.3,  # AUPRC is crucial for imbalanced data
+                'test_recall': 0.2,
+                'test_precision': 0.2
+            }
+            
+            for model_name, results in cv_results.items():
+                weighted_score = sum(
+                    weights[metric] * results[metric].mean() 
+                    for metric in weights.keys()
+                )
+                overall_scores[model_name] = weighted_score
+            
+            # Find best overall model
+            best_overall_model = max(overall_scores, key=overall_scores.get)
+            best_overall_score = overall_scores[best_overall_model]
+            
+            st.success(f"""
+            🎯 **Recommended Model for {cv_dataset_choice}**: **{best_overall_model}**
+            
+            **Overall Weighted Score**: {best_overall_score:.3f}
+            
+            This recommendation is based on a weighted average of F1-Score (30%), AUPRC (30%), Recall (20%), and Precision (20%).
+            """)
+            
+            # Detailed insights
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("### 🔍 **Key Insights**")
+                
+                # Finds most consistent model (lowest std deviation across key metrics)
+                consistency_scores = {}
+                for model_name, results in cv_results.items():
+                    avg_std = np.mean([
+                        results['test_f1'].std(),
+                        results['test_average_precision'].std(),
+                        results['test_recall'].std(),
+                        results['test_precision'].std()
+                    ])
+                    consistency_scores[model_name] = avg_std
+                
+                most_consistent = min(consistency_scores, key=consistency_scores.get)
+                
+                st.write(f"""
+                - **Most Consistent Model**: {most_consistent}
+                - **Best F1-Score**: {best_models['F1-Score'][0]}
+                - **Best AUPRC**: {best_models['AUPRC'][0]}
+                - **Best Recall**: {best_models['Recall'][0]}
+                """)
+            
+            with col2:
+                st.markdown("### 📈 **Performance Characteristics**")
+                
+                # Calculates performance characteristics
+                ensemble_f1 = cv_results.get('Ensemble (RF+LR)', {}).get('test_f1', np.array([0])).mean()
+                xgb_f1 = cv_results.get('XGBoost', {}).get('test_f1', np.array([0])).mean()
+                
+                if ensemble_f1 > xgb_f1:
+                    st.write("""
+                    - **Ensemble models** show strong performance
+                    - **Model combination** improves robustness
+                    - **Consistent results** across folds
+                    - **Lower variance** in predictions
+                    """)
+                else:
+                    st.write("""
+                    - **XGBoost** demonstrates superior performance
+                    - **Gradient boosting** effective for this data
+                    - **Feature importance** well captured
+                    - **Efficient handling** of imbalanced data
+                    """)
+            
+            # Model stability analysis
+            st.subheader("📊 Model Stability Analysis")
+            st.write("Coefficient of variation (CV) shows how stable each model's performance is across folds:")
+            
+            stability_data = []
+            for model_name, results in cv_results.items():
+                for metric in ['test_f1', 'test_average_precision', 'test_recall', 'test_precision']:
+                    mean_val = results[metric].mean()
+                    std_val = results[metric].std()
+                    cv_val = (std_val / mean_val) * 100 if mean_val > 0 else 0
+                    
+                    stability_data.append({
+                        'Model': model_name,
+                        'Metric': metric.replace('test_', '').replace('_', ' ').title(),
+                        'CV (%)': cv_val,
+                        'Mean': mean_val,
+                        'Std': std_val
+                    })
+            
+            stability_df = pd.DataFrame(stability_data)
+            
+            # Creates stability heatmap
+            pivot_stability = stability_df.pivot(index='Model', columns='Metric', values='CV (%)')
+            
+            fig_stability = px.imshow(
+                pivot_stability.values,
+                x=pivot_stability.columns,
+                y=pivot_stability.index,
+                color_continuous_scale='RdYlGn_r',
+                title='Model Stability Heatmap (Lower CV% = More Stable)',
+                labels={'color': 'CV (%)'}
+            )
+            
+            fig_stability.update_layout(template='plotly_dark')
+            st.plotly_chart(fig_stability, use_container_width=True)
+            
+            st.info("""
+            💡 **Stability Interpretation**:
+            - **Lower CV%** = More stable and reliable performance
+            - **Higher CV%** = More variable performance across different data splits
+            - **Green areas** = Stable performance, **Red areas** = Variable performance
+            """)
+            
+            # Cross-validation fold analysis
+            st.subheader("🔍 Fold-by-Fold Analysis")
+            
+            # Creates fold performance plot
+            fold_data = []
+            for model_name, results in cv_results.items():
+                for fold_idx in range(cv_folds):
+                    fold_data.append({
+                        'Model': model_name,
+                        'Fold': f'Fold {fold_idx + 1}',
+                        'F1-Score': results['test_f1'][fold_idx],
+                        'AUPRC': results['test_average_precision'][fold_idx],
+                        'Recall': results['test_recall'][fold_idx],
+                        'Precision': results['test_precision'][fold_idx]
+                    })
+            
+            fold_df = pd.DataFrame(fold_data)
+            
+            # Line plot showing performance across folds
+            fig_folds = px.line(
+                fold_df,
+                x='Fold',
+                y='F1-Score',
+                color='Model',
+                title='F1-Score Across Cross-Validation Folds',
+                markers=True
+            )
+            
+            fig_folds.update_layout(template='plotly_dark')
+            st.plotly_chart(fig_folds, use_container_width=True)
+            
+            # Pairwise model comparison
+            st.subheader("⚖️ Pairwise Model Comparisons")
+            st.write("Statistical significance testing between models (Wilcoxon signed-rank test):")
+            
+            from scipy.stats import wilcoxon
+            
+            model_names = list(cv_results.keys())
+            comparison_results = []
+            
+            for i, model1 in enumerate(model_names):
+                for j, model2 in enumerate(model_names):
+                    if i < j:  # Avoids duplicate comparisons
+                        f1_scores_1 = cv_results[model1]['test_f1']
+                        f1_scores_2 = cv_results[model2]['test_f1']
+                        
+                        try:
+                            stat, p_value = wilcoxon(f1_scores_1, f1_scores_2)
+                            significance = "Significant" if p_value < 0.05 else "Not Significant"
+                            
+                            comparison_results.append({
+                                'Model 1': model1,
+                                'Model 2': model2,
+                                'Mean Diff (F1)': f1_scores_1.mean() - f1_scores_2.mean(),
+                                'P-value': p_value,
+                                'Significance': significance
+                            })
+                        except:
+                            comparison_results.append({
+                                'Model 1': model1,
+                                'Model 2': model2,
+                                'Mean Diff (F1)': f1_scores_1.mean() - f1_scores_2.mean(),
+                                'P-value': 'N/A',
+                                'Significance': 'N/A'
+                            })
+            
+            if comparison_results:
+                comparison_df = pd.DataFrame(comparison_results)
+                st.dataframe(comparison_df, use_container_width=True)
+                
+                st.info("""
+                📊 **Statistical Significance**: 
+                - **P-value < 0.05**: Statistically significant difference between models
+                - **P-value ≥ 0.05**: No statistically significant difference
+                - **Mean Diff**: Positive values favour Model 1, negative values favour Model 2
+                """)
+            
+            # Business impact analysis
+            st.subheader("💼 Business Impact Analysis")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("#### 📊 Detection Performance")
+                
+                # Calculates business metrics for best model
+                best_model_results = cv_results[best_overall_model]
+                avg_recall = best_model_results['test_recall'].mean()
+                avg_precision = best_model_results['test_precision'].mean()
+                
+                total_fraud = y_cv.sum()
+                estimated_fraud_detected = int(total_fraud * avg_recall)
+                estimated_false_alarms = int((len(y_cv) - total_fraud) * (1 - avg_precision) * avg_recall / avg_precision) if avg_precision > 0 else 0
+                
+                st.metric("Expected Fraud Detection", f"{estimated_fraud_detected:,} / {total_fraud:,}")
+                st.metric("Expected False Alarms", f"{estimated_false_alarms:,}")
+                st.metric("Detection Rate", f"{avg_recall:.1%}")
+            
+            with col2:
+                st.markdown("#### 💰 Cost-Benefit Estimation")
+                
+                # Rough cost-benefit analysis
+                avg_fraud_amount = 1000 if "Transaction" in cv_dataset_choice else 120
+                investigation_cost_per_alert = 50
+                
+                fraud_value_saved = estimated_fraud_detected * avg_fraud_amount
+                investigation_costs = (estimated_fraud_detected + estimated_false_alarms) * investigation_cost_per_alert
+                net_benefit = fraud_value_saved - investigation_costs
+                
+                st.metric("Estimated Fraud Value Saved", f"£{fraud_value_saved:,.2f}")
+                st.metric("Investigation Costs", f"£{investigation_costs:,.2f}")
+                st.metric("Net Benefit", f"£{net_benefit:,.2f}")
+            
+            # Final recommendations
+            st.subheader("🎯 Final Recommendations")
+            
+            if best_overall_score > 0.8:
+                recommendation_type = "success"
+                recommendation_icon = "✅"
+                recommendation_title = "Excellent Performance - Ready for Production"
+            elif best_overall_score > 0.6:
+                recommendation_type = "warning"
+                recommendation_icon = "⚠️"
+                recommendation_title = "Good Performance - Consider Fine-tuning"
+            else:
+                recommendation_type = "error"
+                recommendation_icon = "❌"
+                recommendation_title = "Needs Improvement - Requires Further Development"
+            
+            getattr(st, recommendation_type)(f"""
+            {recommendation_icon} **{recommendation_title}**
+            
+            **Recommended Model**: {best_overall_model}
+            **Overall Score**: {best_overall_score:.3f}
+            
+            **Next Steps**:
+            - Deploy {best_overall_model} for production use
+            - Monitor performance on live data
+            - Set up automated retraining pipeline
+            - Implement A/B testing for continuous improvement
+            """)
+            
+        else:
+            st.error("❌ Cross-validation failed. Please check your data and try again.")
+
+elif analysis_mode == "Single Model Analysis":
+    # Single model selection
     model_choice = st.sidebar.selectbox(
         "Choose a Detection Model:",
         (
@@ -305,7 +989,7 @@ if analysis_mode == "Single Model Analysis":
         )
     )
     
-    # Original artifact loading for single model
+    # Artifact loading for single model
     @st.cache_resource
     def load_artifacts(choice):
         """Loads the selected model and SHAP explainer from disk."""
