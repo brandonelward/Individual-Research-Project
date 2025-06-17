@@ -523,6 +523,11 @@ def st_shap_plot(shap_explanation_object):
     behind the model's decision. This helps fraud analysts understand which transaction patterns to investigate first!
     """)
 
+@st.cache_data
+def load_data(path):
+    """Loads data from a CSV file and caches it."""
+    return pd.read_csv(path)
+
 # Streamlit App Configuration
 st.set_page_config(page_title="Fraud Detection System", layout="wide", initial_sidebar_state="expanded")
 st.title("🔬 Explainable AI Fraud Detection System")
@@ -554,19 +559,25 @@ if analysis_mode == "Cross-Validation Analysis":
         value=5,
         help="Higher folds = more robust results but longer computation time"
     )
-    
-    # Adds a data sampler slider to control memory usage
-    sample_size = st.sidebar.slider(
-        "CV Data Sample Size:",
-        min_value=1000,
-        max_value=50000,
-        value=20000, # A reasonable default to prevent crashes
-        step=1000,
-        help="Use a smaller sample to prevent memory crashes on the deployed app. Max is 50,000 rows."
-    )
 
-    # Displays selected configuration
-    st.sidebar.info(f"Running {cv_folds}-fold stratified cross-validation on {cv_dataset_choice}")
+    # Checkbox to toggle between full dataset and sample
+    use_full_dataset = st.sidebar.checkbox(
+        "Use Full Dataset (Local Only)", 
+        value=False, 
+        help="Warning: Using the full dataset may crash the deployed app due to memory limits. Recommended for local use only."
+    )
+    
+    # Warns user if full dataset is selected
+    if use_full_dataset:
+        st.sidebar.warning("Full dataset mode enabled. This may be slow or crash the deployed application.")
+    else: # Uses a sample for CV
+        sample_size = st.sidebar.slider(
+            "CV Data Sample Size:", 
+            min_value=5000, max_value=50000, value=20000, step=1000,
+            help="A smaller sample prevents memory crashes on the deployed app."
+        )
+        st.sidebar.info(f"Running on a {sample_size:,} row sample.")
+
     
     # CROSS-VALIDATION ANALYSIS TAB
     st.header(f"📊 Cross-Validation Analysis: {cv_dataset_choice}")
@@ -578,78 +589,70 @@ if analysis_mode == "Cross-Validation Analysis":
     # Loads appropriate dataset
     try:
         script_dir = Path(__file__).parent.parent
-        
         if cv_dataset_choice == "Credit Card Dataset":
             data_path = script_dir / "data" / "creditcard.csv"
             preprocessing_func = preprocess_credit_card_data
             target_col = 'Class'
-        else:  # Transactions Dataset
+        else:
             data_path = script_dir / "data" / "transactions_sample_280k.csv"
             preprocessing_func = preprocess_transactions_data
             target_col = 'isFraud'
         
-        if not data_path.exists():
-            st.error(f"Dataset not found at: {data_path}")
-            st.info("Please ensure the required dataset files are in the data directory.")
-            st.stop()
+        dataset_df = load_data(data_path)
+    except FileNotFoundError as e:
+        st.error(f"Dataset file not found: {e}. Please ensure the data files are in the 'data' directory.")
+        st.stop()
             
         dataset_df = load_sample_data(data_path)
         
     except Exception as e:
         st.error(f"Error loading dataset: {e}")
         st.stop()
-    
 
-    # Creates the sample of the data
-    if len(dataset_df) > sample_size:
-        # Stratified sampling is used to maintain the fraud rate in the sample
-        fraud_df = dataset_df[dataset_df[target_col] == 1]
-        non_fraud_df = dataset_df[dataset_df[target_col] == 0]
-        
-        # Calculates how many non-fraud samples we need
-        if not fraud_df.empty:
-            fraud_ratio = len(fraud_df) / len(dataset_df)
+    # Conditionally samples the data based on the checkbox
+    if not use_full_dataset:
+        st.info(f"Using a stratified random sample of {sample_size:,} transactions for this analysis to conserve memory.")
+        # Stratified sampling logic
+        if len(dataset_df) > sample_size:
+            fraud_df = dataset_df[dataset_df[target_col] == 1]
+            non_fraud_df = dataset_df[dataset_df[target_col] == 0]
+            
+            fraud_ratio = len(fraud_df) / len(dataset_df) if len(dataset_df) > 0 else 0
             n_fraud_sample = int(sample_size * fraud_ratio)
             n_non_fraud_sample = sample_size - n_fraud_sample
             
-            # Ensures we don't try to sample more than we have
             n_fraud_sample = min(n_fraud_sample, len(fraud_df))
             n_non_fraud_sample = min(n_non_fraud_sample, len(non_fraud_df))
 
-            sampled_fraud = fraud_df.sample(n=n_fraud_sample, random_state=42)
+            sampled_fraud = fraud_df.sample(n=n_fraud_sample, random_state=42) if n_fraud_sample > 0 else pd.DataFrame()
             sampled_non_fraud = non_fraud_df.sample(n=n_non_fraud_sample, random_state=42)
             
-            cv_sample_df = pd.concat([sampled_fraud, sampled_non_fraud]).sample(frac=1, random_state=42).reset_index(drop=True)
-        else: # If no fraud, just take a random sample
-            cv_sample_df = dataset_df.sample(n=sample_size, random_state=42)
+            cv_run_df = pd.concat([sampled_fraud, sampled_non_fraud]).sample(frac=1, random_state=42).reset_index(drop=True)
+        else:
+            cv_run_df = dataset_df
     else:
-        cv_sample_df = dataset_df
+        st.warning("Running analysis on the full dataset. This may be slow.")
+        cv_run_df = dataset_df
 
 
     # Displays dataset information
-    with st.expander("📋 Dataset Information (Using Sample for CV)", expanded=True):
-        st.info(f"A random sample of **{len(cv_sample_df):,}** transactions is being used for this analysis to conserve memory.")
+    with st.expander("📋 Dataset Information Being Used", expanded=False):
         col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Transactions", f"{len(cv_sample_df):,}")
-        with col2:
-            fraud_count = cv_sample_df[target_col].sum()
-            st.metric("Fraudulent Transactions", f"{fraud_count:,}")
-        with col3:
-            fraud_rate = fraud_count / len(cv_sample_df) * 100 if len(cv_sample_df) > 0 else 0
-            st.metric("Fraud Rate in Sample", f"{fraud_rate:.2f}%")
-        st.dataframe(cv_sample_df.head(), use_container_width=True)
+        fraud_count = cv_run_df[target_col].sum()
+        fraud_rate = fraud_count / len(cv_run_df) * 100 if len(cv_run_df) > 0 else 0
+        col1.metric("Transactions for CV", f"{len(cv_run_df):,}")
+        col2.metric("Fraudulent Transactions", f"{fraud_count:,}")
+        col3.metric("Fraud Rate", f"{fraud_rate:.3f}%")
+        st.dataframe(cv_run_df.head(), use_container_width=True)
+
     
     # Runs Cross-Validation Analysis
     if st.button("🚀 Run Cross-Validation Analysis", type="primary"):
         with st.spinner("Preprocessing data and preparing models..."):
-            # Uses the sampled data for CV
-            X_cv, y_cv = preprocessing_func(cv_sample_df, for_performance=True)
-            st.success(f"✅ Data preprocessed successfully!")
+            X_cv, y_cv = preprocessing_func(cv_run_df, for_performance=True)
+            st.success("✅ Data preprocessed successfully!")
         
         st.subheader("🔄 Running Cross-Validation")
-        cv_results = perform_cross_validation(X_cv, y_cv, cv_dataset_choice, cv_folds)
-        
         # Performs cross-validation
         cv_results = perform_cross_validation(X_cv, y_cv, cv_dataset_choice, cv_folds)
         
@@ -660,6 +663,7 @@ if analysis_mode == "Cross-Validation Analysis":
             st.subheader("📋 Cross-Validation Results Summary")
             
             summary_df = create_cv_summary_table(cv_results)
+            st.dataframe(summary_df.style.highlight_max(axis=0, color='lightgreen'), use_container_width=True)
             
             # Highlights best performing models for each metric
             def highlight_best(s):
@@ -676,14 +680,7 @@ if analysis_mode == "Cross-Validation Analysis":
                 return ['background-color: lightgreen' if val == max_val and val > 0 else '' 
                         for val in numeric_values]
             
-            # Displays styled dataframe
-            styled_df = summary_df.set_index('Model')
-            
-            # Highlights the maximum value in each column
-            styled_df = styled_df.style.highlight_max(axis=0, color='lightgreen')
-            
-            st.dataframe(styled_df, use_container_width=True)
-            
+        
             # Download link for results
             csv_results = summary_df.to_csv(index=False)
             st.download_button(
@@ -748,7 +745,7 @@ if analysis_mode == "Cross-Validation Analysis":
             overall_scores = {}
             weights = {
                 'test_f1': 0.3,
-                'test_average_precision': 0.3,  # AUPRC is crucial for imbalanced data
+                'test_average_precision': 0.3,
                 'test_recall': 0.2,
                 'test_precision': 0.2
             }
@@ -966,7 +963,7 @@ if analysis_mode == "Cross-Validation Analysis":
                 
                 # Rough cost-benefit analysis
                 avg_fraud_amount = 1000 if "Transaction" in cv_dataset_choice else 120
-                investigation_cost_per_alert = 50
+                investigation_cost_per_alert = 50 # Estimated cost per alert investigated
                 
                 fraud_value_saved = estimated_fraud_detected * avg_fraud_amount
                 investigation_costs = (estimated_fraud_detected + estimated_false_alarms) * investigation_cost_per_alert
@@ -1233,7 +1230,7 @@ elif analysis_mode == "Single Model Analysis":
             col3.metric("Frauds Detected", f"{detected_fraud}/{total_fraud}", help="Actual fraud cases caught by the model")
             col4.metric("False Alarms", f"{false_alarms:,}", help="Legitimate transactions flagged as fraud")
 
-            # Add interpretation guide
+            # Adds interpretation guide
             st.info("""
             🔍 **Metric Interpretation for Fraud Detection:**
             - **AUPRC**: Most important for imbalanced data. Higher is better (0-1 scale)
@@ -1522,7 +1519,7 @@ else:  # Model Comparison Mode
             for metric in ['accuracy', 'precision', 'recall', 'f1_score', 'roc_auc', 'auprc']
         }, index=['Ensemble', 'XGBoost'])
         
-        # Display metrics table with highlighting
+        # Displays metrics table with highlighting
         st.dataframe(
             metrics_df.style.highlight_max(axis=0, color='lightgreen')
                            .format("{:.4f}"),
