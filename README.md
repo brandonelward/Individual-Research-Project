@@ -1,5 +1,9 @@
 # Individual Research Project
 
+# Github Repo: 
+
+https://github.com/brandonelward/Individual-Research-Project/tree/main
+
 # 🔬 Explainable AI Fraud Detection System
 
 Final Year Individual Research Project: A comprehensive machine learning system for fraud detection with explainable AI capabilities, featuring multiple models, streaming analysis, cross-validation analysis, and an interactive web application.
